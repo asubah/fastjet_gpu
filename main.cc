@@ -31,6 +31,11 @@ void initialise() {
   std::cout << "  - kernel printf buffer size:       " << size / 1024 << " kB" << std::endl;
 }
 
+int grid_memory_size(double min_rap, double max_rap, double min_phi, double max_phi, double r, int n) {
+  r = (2 * M_PI) / (int)((2 * M_PI) / r);
+  return sizeof(int) * (int)((max_rap - min_rap) / r) * (int)((max_phi - min_phi) / r) * n;
+}
+
 bool read_next_event(std::istream& input, std::vector<PseudoJet>& particles) {
   // clear the input status flags
   input.clear();
@@ -125,6 +130,7 @@ int main(int argc, const char* argv[]) {
   int combine = 1;
   std::string filename;  // read data from file instead of standard input
   bool output_csv = false;
+  int stream_count = 1;
 
   for (unsigned int i = 1; i < argc; ++i) {
     // --ptmin, -p
@@ -146,8 +152,8 @@ int main(int argc, const char* argv[]) {
       }
     } else
 
-    // -r, -R
-    if (std::strcmp(argv[i], "-r") == 0 or std::strcmp(argv[i], "-R") == 0) {
+        // -r, -R
+        if (std::strcmp(argv[i], "-r") == 0 or std::strcmp(argv[i], "-R") == 0) {
       ++i;
       if (i >= argc) {
         // error
@@ -165,8 +171,8 @@ int main(int argc, const char* argv[]) {
       }
     } else
 
-    // --repeat, -repeat
-    if (std::strcmp(argv[i], "--repeat") == 0 or std::strcmp(argv[i], "-repeat") == 0) {
+        // --repeat, -repeat
+        if (std::strcmp(argv[i], "--repeat") == 0 or std::strcmp(argv[i], "-repeat") == 0) {
       ++i;
       if (i >= argc) {
         // error
@@ -184,38 +190,38 @@ int main(int argc, const char* argv[]) {
       }
     } else
 
-    // --sort, -s
-    if (std::strcmp(argv[i], "--sort") == 0 or std::strcmp(argv[i], "-s") == 0) {
+        // --sort, -s
+        if (std::strcmp(argv[i], "--sort") == 0 or std::strcmp(argv[i], "-s") == 0) {
       sort = true;
     } else
 
-    // --cartesian
-    if (std::strcmp(argv[i], "--cartesian") == 0) {
+        // --cartesian
+        if (std::strcmp(argv[i], "--cartesian") == 0) {
       cartesian = true;
     } else
 
-    // --polar
-    if (std::strcmp(argv[i], "--polar") == 0) {
+        // --polar
+        if (std::strcmp(argv[i], "--polar") == 0) {
       cartesian = false;
     } else
 
-    // --kt, -kt
-    if (std::strcmp(argv[i], "--kt") == 0 or std::strcmp(argv[i], "-kt") == 0) {
+        // --kt, -kt
+        if (std::strcmp(argv[i], "--kt") == 0 or std::strcmp(argv[i], "-kt") == 0) {
       algo = Algorithm::Kt;
     } else
 
-    // --anti-kt, -antikt
-    if (std::strcmp(argv[i], "--anti-kt") == 0 or std::strcmp(argv[i], "-antikt") == 0) {
+        // --anti-kt, -antikt
+        if (std::strcmp(argv[i], "--anti-kt") == 0 or std::strcmp(argv[i], "-antikt") == 0) {
       algo = Algorithm::AntiKt;
     } else
 
-    // --cambridge-aachen, -cam
-    if (std::strcmp(argv[i], "--cambridge-aachen") == 0 or std::strcmp(argv[i], "-cam") == 0) {
+        // --cambridge-aachen, -cam
+        if (std::strcmp(argv[i], "--cambridge-aachen") == 0 or std::strcmp(argv[i], "-cam") == 0) {
       algo = Algorithm::CambridgeAachen;
     } else
 
-    // --file, -f
-    if (std::strcmp(argv[i], "--file") == 0 or std::strcmp(argv[i], "-f") == 0) {
+        // --file, -f
+        if (std::strcmp(argv[i], "--file") == 0 or std::strcmp(argv[i], "-f") == 0) {
       ++i;
       if (i >= argc) {
         // error
@@ -225,8 +231,8 @@ int main(int argc, const char* argv[]) {
       filename = argv[i];
     } else
 
-    // --combine, -combine
-    if (std::strcmp(argv[i], "--combine") == 0 or std::strcmp(argv[i], "-combine") == 0) {
+        // --combine, -combine
+        if (std::strcmp(argv[i], "--combine") == 0 or std::strcmp(argv[i], "-combine") == 0) {
       ++i;
       if (i >= argc) {
         // error
@@ -244,9 +250,28 @@ int main(int argc, const char* argv[]) {
       }
     } else
 
-    // --csv, -csv
-    if (std::strcmp(argv[i], "--csv") == 0 or std::strcmp(argv[i], "-csv") == 0) {
+        // --csv, -csv
+        if (std::strcmp(argv[i], "--csv") == 0 or std::strcmp(argv[i], "-csv") == 0) {
       output_csv = true;
+    } else
+
+        // --stream_count, -sc
+        if (std::strcmp(argv[i], "--stream_count") == 0 or std::strcmp(argv[i], "-sc") == 0) {
+      ++i;
+      if (i >= argc) {
+        // error
+        std::cerr << "Missing argument to option " << argv[i - 1] << std::endl;
+        return 1;
+      }
+      char* stop;
+      auto arg = std::strtol(argv[i], &stop, 0);
+      if (stop != argv[i] and arg >= 0) {
+        stream_count = arg;
+      } else {
+        // error
+        std::cerr << "Error while parsing argument to option " << argv[i - 1] << std::endl;
+        return 1;
+      }
     } else
 
     // unknown option
@@ -262,109 +287,197 @@ int main(int argc, const char* argv[]) {
   // open an input file
   std::ifstream input(filename, std::ios_base::in);
 
-  std::vector<PseudoJet> particles;
-  std::vector<PseudoJet> jets;
+  if (stream_count > 1) {
+    std::cout << "Stream count is " << stream_count << "\n";
+    const int MAX_PARTICLES_PER_EVENT = 3000;
+    const int MAX_SIZE = MAX_PARTICLES_PER_EVENT * stream_count;
 
-  int events;
-  while (events = read_n_events(filename.empty() ? std::cin : input, particles, combine)) {
-    if (not output_csv) {
-      std::cout << "found " << particles.size() << " particles";
-      if (combine != 1)
-        std::cout << " in " << events << (events == 1 ? " event" : " events");
-      std::cout << std::endl;
-    }
+    std::vector<PseudoJet>* events = new std::vector<PseudoJet>[stream_count];
+    std::vector<PseudoJet>* jets = new std::vector<PseudoJet>[stream_count];
 
     // allocate GPU memory for the input particles
     PseudoJet* particles_d;
-    cudaCheck(cudaMalloc(&particles_d, sizeof(PseudoJet) * particles.size()));
+    cudaCheck(cudaMalloc(&particles_d, sizeof(PseudoJet) * MAX_SIZE));
 
-    cudaEvent_t start, stop;
-    cudaCheck(cudaEventCreate(&start));
-    cudaCheck(cudaEventCreate(&stop));
+    int* d_grid;
+    const int GRID_SIZE = grid_memory_size(-10., +10., 0, 2 * M_PI, r, MAX_PARTICLES_PER_EVENT);
+    cudaCheck(cudaMalloc(&d_grid, GRID_SIZE * stream_count));
 
-    double sum = 0.;
-    double sum2 = 0.;
-    for (int step = 0; repetitions == 0 or step < repetitions; ++step) {
-      cudaCheck(cudaEventRecord(start));
+    PseudoJetExt* pseudojets;
+    cudaCheck(cudaMalloc(&pseudojets, sizeof(PseudoJetExt) * MAX_SIZE));
+
+    Dist* d_min_dists_ptr;
+    cudaCheck(cudaMalloc(&d_min_dists_ptr, sizeof(Dist) * MAX_SIZE));
+
+    int stream_id = 0;
+    cudaStream_t *stream = new cudaStream_t[stream_count];
+    for (int i = 0; i < stream_count; ++i)
+      cudaStreamCreate(&stream[i]);
+
+    while (read_n_events(filename.empty() ? std::cin : input, events[stream_id], combine)) {
+      std::cout << "found " << events[stream_id].size() << " particles\n";
+      std::cout << "This will go into stream #" << stream_id << "\n";
 
       // copy the input to the GPU
-      cudaCheck(cudaMemcpy(particles_d, particles.data(), sizeof(PseudoJet) * particles.size(), cudaMemcpyDefault));
-
-      // run the clustering algorithm and measure its running time
-      cluster(particles_d, particles.size(), algo, r);
+      cudaCheck(cudaMemcpyAsync(particles_d + stream_id * MAX_PARTICLES_PER_EVENT,
+                                events[stream_id].data(),
+                                sizeof(PseudoJet) * events[stream_id].size(),
+                                cudaMemcpyDefault,
+                                stream[stream_id]));
+      std::cout << "Copy to GPU Done!\n";
+      // run the clustering algorithm
+      cluster(particles_d + stream_id * MAX_PARTICLES_PER_EVENT,
+              events[stream_id].size(),
+              algo,
+              r,
+              stream[stream_id],
+              d_grid + stream_id * GRID_SIZE,
+              pseudojets + stream_id * MAX_PARTICLES_PER_EVENT,
+              d_min_dists_ptr + stream_id * MAX_PARTICLES_PER_EVENT);
+      std::cout << "Cluster Done!\n";
 
       // copy the clustered jets back to the CPU
-      jets.resize(particles.size());
-      cudaCheck(cudaMemcpy(jets.data(), particles_d, sizeof(PseudoJet) * jets.size(), cudaMemcpyDefault));
+      jets[stream_id].resize(events[stream_id].size());
+      cudaCheck(cudaMemcpyAsync(jets[stream_id].data(),
+                                particles_d + stream_id * MAX_PARTICLES_PER_EVENT,
+                                sizeof(PseudoJet) * jets[stream_id].size(),
+                                cudaMemcpyDefault,
+                                stream[stream_id]));
+      std::cout << "Copy from GPU  Done!\n";
+      if (stream_id + 1 == stream_count) {
+        cudaDeviceSynchronize();
+        // remove the unused elements and the jets with pT < pTmin
+        auto last = std::remove_if(jets[stream_id].begin(), jets[stream_id].end(), [ptmin](auto const& jet) {
+          return (not jet.isJet) or (jet.px * jet.px + jet.py * jet.py < ptmin * ptmin);
+        });
+        jets[stream_id].erase(last, jets[stream_id].end());
 
-      cudaCheck(cudaEventRecord(stop));
-      cudaCheck(cudaEventSynchronize(stop));
-
-      float milliseconds;
-      cudaCheck(cudaEventElapsedTime(&milliseconds, start, stop));
-      sum += milliseconds;
-      sum2 += milliseconds * milliseconds;
-
-      // remove the unused elements and the jets with pT < pTmin
-      auto last = std::remove_if(jets.begin(), jets.end(), [ptmin](auto const& jet) {
-        return (not jet.isJet) or (jet.px * jet.px + jet.py * jet.py < ptmin * ptmin);
-      });
-      jets.erase(last, jets.end());
-
-      if (not output_csv) {
         if (ptmin > 0.) {
-          std::cout << "found " << jets.size() << " jets above " << ptmin << " GeV in " << milliseconds << " ms"
-                    << std::endl;
+          std::cout << "found " << jets[stream_id].size() << " jets above " << ptmin << " GeV\n";
         } else {
-          std::cout << "found " << jets.size() << " jets in " << milliseconds << " ms" << std::endl;
-        }
-
-        // optionally, sort the jets by decreasing pT
-        if (sort) {
-          std::sort(jets.begin(), jets.end(), [](auto const& a, auto const& b) {
-            return (a.px * a.px + a.py * a.py > b.px * b.px + b.py * b.py);
-          });
+          std::cout << "found " << jets[stream_id].size() << std::endl;
         }
       }
+
+      stream_id = (stream_id + 1) % stream_count;
     }
 
-    // free GPU memory
-    cudaCheck(cudaFree(particles_d));
+    for (int i = 0; i < stream_count; ++i)
+      cudaStreamDestroy(stream[i]);
+     
+    cudaCheck(cudaFree(pseudojets));
+    cudaCheck(cudaFree(d_grid));
+    cudaCheck(cudaFree(d_min_dists_ptr)); 
+    cudaCheck(cudaFree(particles_d)); 
 
-    if (not output_csv)
-      print_jets(jets, cartesian);
+    delete[] stream;
+    delete[] events;
+    std::cout << grid_memory_size(-10., +10., 0, 2 * M_PI, r, MAX_PARTICLES_PER_EVENT) << std::endl;
+  } else {
+    std::vector<PseudoJet> particles;
+    std::vector<PseudoJet> jets;
 
-    std::cout << std::defaultfloat;
-
-    if (not output_csv) {
-      std::cout << "clustered " << particles.size() << " particles into " << jets.size() << " jets above " << ptmin
-                << " GeV";
-    } else {
-      std::cout << particles.size() << ',' << jets.size() << ',';
-    }
-
-    std::cout << std::fixed;
-    double mean = sum / repetitions;
-    int precision;
-    if (repetitions > 1) {
-      double sigma = std::sqrt((sum2 - sum * sum / repetitions) / (repetitions - 1));
-      precision = std::max((int)-std::log10(sigma / 2.) + 1, 0);
-      precision = std::cout.precision(precision);
+    int events;
+    while (events = read_n_events(filename.empty() ? std::cin : input, particles, combine)) {
       if (not output_csv) {
-        std::cout << " in " << mean << " +/- " << sigma << " ms" << std::endl;
-      } else {
-        std::cout << mean << ',' << sigma << std::endl;
+        std::cout << "found " << particles.size() << " particles";
+        if (combine != 1)
+          std::cout << " in " << events << (events == 1 ? " event" : " events");
+        std::cout << std::endl;
       }
-    } else {
-      precision = std::cout.precision(1);
+
+      // allocate GPU memory for the input particles
+      PseudoJet* particles_d;
+      cudaCheck(cudaMalloc(&particles_d, sizeof(PseudoJet) * particles.size()));
+
+      cudaEvent_t start, stop;
+      cudaCheck(cudaEventCreate(&start));
+      cudaCheck(cudaEventCreate(&stop));
+
+      double sum = 0.;
+      double sum2 = 0.;
+      for (int step = 0; repetitions == 0 or step < repetitions; ++step) {
+        cudaCheck(cudaEventRecord(start));
+
+        // copy the input to the GPU
+        cudaCheck(cudaMemcpy(particles_d, particles.data(), sizeof(PseudoJet) * particles.size(), cudaMemcpyDefault));
+
+        // run the clustering algorithm and measure its running time
+        //cluster(particles_d, particles.size(), algo, r);
+
+        // copy the clustered jets back to the CPU
+        jets.resize(particles.size());
+        cudaCheck(cudaMemcpy(jets.data(), particles_d, sizeof(PseudoJet) * jets.size(), cudaMemcpyDefault));
+
+        cudaCheck(cudaEventRecord(stop));
+        cudaCheck(cudaEventSynchronize(stop));
+
+        float milliseconds;
+        cudaCheck(cudaEventElapsedTime(&milliseconds, start, stop));
+        sum += milliseconds;
+        sum2 += milliseconds * milliseconds;
+
+        // remove the unused elements and the jets with pT < pTmin
+        auto last = std::remove_if(jets.begin(), jets.end(), [ptmin](auto const& jet) {
+          return (not jet.isJet) or (jet.px * jet.px + jet.py * jet.py < ptmin * ptmin);
+        });
+        jets.erase(last, jets.end());
+
+        if (not output_csv) {
+          if (ptmin > 0.) {
+            std::cout << "found " << jets.size() << " jets above " << ptmin << " GeV in " << milliseconds << " ms"
+                      << std::endl;
+          } else {
+            std::cout << "found " << jets.size() << " jets in " << milliseconds << " ms" << std::endl;
+          }
+
+          // optionally, sort the jets by decreasing pT
+          if (sort) {
+            std::sort(jets.begin(), jets.end(), [](auto const& a, auto const& b) {
+              return (a.px * a.px + a.py * a.py > b.px * b.px + b.py * b.py);
+            });
+          }
+        }
+      }
+
+      // free GPU memory
+      cudaCheck(cudaFree(particles_d));
+
+      if (not output_csv)
+        print_jets(jets, cartesian);
+
+      std::cout << std::defaultfloat;
+
       if (not output_csv) {
-        std::cout << " in " << mean << " ms" << std::endl;
+        std::cout << "clustered " << particles.size() << " particles into " << jets.size() << " jets above " << ptmin
+                  << " GeV";
       } else {
-        std::cout << mean << std::endl;
+        std::cout << particles.size() << ',' << jets.size() << ',';
       }
+
+      std::cout << std::fixed;
+      double mean = sum / repetitions;
+      int precision;
+      if (repetitions > 1) {
+        double sigma = std::sqrt((sum2 - sum * sum / repetitions) / (repetitions - 1));
+        precision = std::max((int)-std::log10(sigma / 2.) + 1, 0);
+        precision = std::cout.precision(precision);
+        if (not output_csv) {
+          std::cout << " in " << mean << " +/- " << sigma << " ms" << std::endl;
+        } else {
+          std::cout << mean << ',' << sigma << std::endl;
+        }
+      } else {
+        precision = std::cout.precision(1);
+        if (not output_csv) {
+          std::cout << " in " << mean << " ms" << std::endl;
+        } else {
+          std::cout << mean << std::endl;
+        }
+      }
+      std::cout.precision(precision);
+      std::cout << std::defaultfloat;
     }
-    std::cout.precision(precision);
-    std::cout << std::defaultfloat;
   }
 
   return 0;
