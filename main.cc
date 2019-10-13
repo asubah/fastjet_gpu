@@ -289,90 +289,99 @@ int main(int argc, const char* argv[]) {
 
   if (stream_count > 1) {
     std::cout << "Stream count is " << stream_count << "\n";
-    const int MAX_PARTICLES_PER_EVENT = 3000;
-    const int MAX_SIZE = MAX_PARTICLES_PER_EVENT * stream_count;
+    const int MAX_EVENT_SIZE = 3000;
 
     std::vector<PseudoJet>* events = new std::vector<PseudoJet>[stream_count];
     std::vector<PseudoJet>* jets = new std::vector<PseudoJet>[stream_count];
 
     // allocate GPU memory for the input particles
-    PseudoJet* particles_d;
-    cudaCheck(cudaMalloc(&particles_d, sizeof(PseudoJet) * MAX_SIZE));
-
-    int* d_grid;
-    const int GRID_SIZE = grid_memory_size(-10., +10., 0, 2 * M_PI, r, MAX_PARTICLES_PER_EVENT);
-    cudaCheck(cudaMalloc(&d_grid, GRID_SIZE * stream_count));
-
-    PseudoJetExt* pseudojets;
-    cudaCheck(cudaMalloc(&pseudojets, sizeof(PseudoJetExt) * MAX_SIZE));
-
-    Dist* d_min_dists_ptr;
-    cudaCheck(cudaMalloc(&d_min_dists_ptr, sizeof(Dist) * MAX_SIZE));
+    PseudoJet** particles_d = new PseudoJet*[stream_count];
+    int** d_grid = new int*[stream_count];
+    PseudoJetExt** pseudojets = new PseudoJetExt*[stream_count];
+    Dist** d_min_dists_ptr = new Dist*[stream_count];
+    
+    cudaEvent_t *starts = new cudaEvent_t[stream_count];
+    cudaEvent_t *ends = new cudaEvent_t[stream_count];
 
     int stream_id = 0;
-    cudaStream_t *stream = new cudaStream_t[stream_count];
-    for (int i = 0; i < stream_count; ++i)
-      cudaStreamCreate(&stream[i]);
+    cudaStream_t* stream = new cudaStream_t[stream_count];
+    for (int i = 0; i < stream_count; ++i) {
+      std::cout << "malloc " << i << "\n";
+      cudaCheck(cudaMalloc(&particles_d[i], sizeof(PseudoJet) * MAX_EVENT_SIZE));
+      cudaCheck(cudaMalloc(&d_grid[i], grid_memory_size(-10., +10., 0, 2 * M_PI, r, MAX_EVENT_SIZE)));
+      cudaCheck(cudaMalloc(&pseudojets[i], sizeof(PseudoJetExt) * MAX_EVENT_SIZE));
+      cudaCheck(cudaMalloc(&d_min_dists_ptr[i], sizeof(Dist) * MAX_EVENT_SIZE));
+      cudaCheck(cudaStreamCreate(&stream[i]));
+      cudaCheck(cudaEventCreate(&starts[i]));
+      cudaCheck(cudaEventCreate(&ends[i]));
+    }
 
     while (read_n_events(filename.empty() ? std::cin : input, events[stream_id], combine)) {
       std::cout << "found " << events[stream_id].size() << " particles\n";
-      std::cout << "This will go into stream #" << stream_id << "\n";
+      
+      cudaCheck(cudaEventRecord(starts[stream_id]));
 
       // copy the input to the GPU
-      cudaCheck(cudaMemcpyAsync(particles_d + stream_id * MAX_PARTICLES_PER_EVENT,
+      cudaCheck(cudaMemcpyAsync(particles_d[stream_id],
                                 events[stream_id].data(),
                                 sizeof(PseudoJet) * events[stream_id].size(),
                                 cudaMemcpyDefault,
                                 stream[stream_id]));
-      std::cout << "Copy to GPU Done!\n";
       // run the clustering algorithm
-      cluster(particles_d + stream_id * MAX_PARTICLES_PER_EVENT,
+      cluster(particles_d[stream_id],
               events[stream_id].size(),
               algo,
               r,
               stream[stream_id],
-              d_grid + stream_id * GRID_SIZE,
-              pseudojets + stream_id * MAX_PARTICLES_PER_EVENT,
-              d_min_dists_ptr + stream_id * MAX_PARTICLES_PER_EVENT);
-      std::cout << "Cluster Done!\n";
+              d_grid[stream_id],
+              pseudojets[stream_id],
+              d_min_dists_ptr[stream_id]);
 
       // copy the clustered jets back to the CPU
       jets[stream_id].resize(events[stream_id].size());
       cudaCheck(cudaMemcpyAsync(jets[stream_id].data(),
-                                particles_d + stream_id * MAX_PARTICLES_PER_EVENT,
+                                particles_d[stream_id],
                                 sizeof(PseudoJet) * jets[stream_id].size(),
                                 cudaMemcpyDefault,
                                 stream[stream_id]));
-      std::cout << "Copy from GPU  Done!\n";
-      if (stream_id + 1 == stream_count) {
-        cudaDeviceSynchronize();
-        // remove the unused elements and the jets with pT < pTmin
-        auto last = std::remove_if(jets[stream_id].begin(), jets[stream_id].end(), [ptmin](auto const& jet) {
-          return (not jet.isJet) or (jet.px * jet.px + jet.py * jet.py < ptmin * ptmin);
-        });
-        jets[stream_id].erase(last, jets[stream_id].end());
 
-        if (ptmin > 0.) {
-          std::cout << "found " << jets[stream_id].size() << " jets above " << ptmin << " GeV\n";
-        } else {
-          std::cout << "found " << jets[stream_id].size() << std::endl;
+      cudaCheck(cudaEventRecord(ends[stream_id]));      
+      cudaCheck(cudaEventSynchronize(ends[stream_id]));
+
+      if (stream_id + 1 == stream_count) {
+        for (int i = 0; i < stream_count; ++i) {
+          float milliseconds;
+          cudaCheck(cudaEventElapsedTime(&milliseconds, starts[i], ends[i]));
+
+          // remove the unused elements and the jets with pT < pTmin
+          auto last = std::remove_if(jets[i].begin(), jets[i].end(), [ptmin](auto const& jet) {
+            return (not jet.isJet) or (jet.px * jet.px + jet.py * jet.py < ptmin * ptmin);
+          });
+          jets[i].erase(last, jets[i].end());
+
+          if (ptmin > 0.) {
+            std::cout << "found " << jets[i].size() << " jets above " << ptmin << " GeV in " << milliseconds << "ms\n";
+          } else {
+            std::cout << "found " << jets[i].size() << std::endl;
+          }
         }
       }
 
       stream_id = (stream_id + 1) % stream_count;
     }
 
-    for (int i = 0; i < stream_count; ++i)
+    for (int i = 0; i < stream_count; ++i) {
       cudaStreamDestroy(stream[i]);
-     
-    cudaCheck(cudaFree(pseudojets));
-    cudaCheck(cudaFree(d_grid));
-    cudaCheck(cudaFree(d_min_dists_ptr)); 
-    cudaCheck(cudaFree(particles_d)); 
+
+      cudaCheck(cudaFree(pseudojets[i]));
+      cudaCheck(cudaFree(d_grid[i]));
+      cudaCheck(cudaFree(d_min_dists_ptr[i]));
+      cudaCheck(cudaFree(particles_d[i]));
+    }
 
     delete[] stream;
     delete[] events;
-    std::cout << grid_memory_size(-10., +10., 0, 2 * M_PI, r, MAX_PARTICLES_PER_EVENT) << std::endl;
+    std::cout << grid_memory_size(-10., +10., 0, 2 * M_PI, r, MAX_EVENT_SIZE) << std::endl;
   } else {
     std::vector<PseudoJet> particles;
     std::vector<PseudoJet> jets;
