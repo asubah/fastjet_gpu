@@ -259,28 +259,64 @@ __device__ ParticleIndexType &jet_in_grid(Grid const &grid, ParticleIndexType je
 #pragma endregion
 
 #pragma region kernels
-__global__ void set_jets_coordiinates(Grid grid, PseudoJetExt *particles, const ParticleIndexType n, Algorithm algo) {
-  int start = threadIdx.x + blockIdx.x * blockDim.x;
-  int stride = gridDim.x * blockDim.x;
+__global__ void set_jets_coordiinates(
+    Grid grid, PseudoJetExt *particles, const int *events_sizes, Algorithm algo, int max_event_size) {
+  int start = threadIdx.x;
+  int stride = blockDim.x;
+
+  const ParticleIndexType n = events_sizes[blockIdx.x];
+  grid.jets = &grid.jets[blockIdx.x * grid.max_i * grid.max_j * max_event_size];
+  particles = &particles[blockIdx.x * max_event_size];
+
+  // if (threadIdx.x == 0) {
+    // printf(
+        // "== DEBUG INFO =======================\nn =                  %d\nevent_size =         %d\ngrid max i =         "
+        // "%d\ngrid max j =         %d\ngrid address =       %p\npseudojets address = "
+        // "%p\n=====================================\n",
+        // n,
+        // max_event_size,
+        // grid.max_i,
+        // grid.max_j,
+        // grid.jets,
+        // particles);
+  // }
 
   for (int tid = start; tid < n; tid += stride) {
     _set_jet(grid, particles[tid], algo);
-    //printf("particle %3d has (rap,phi,pT) = (%f,%f,%f) and cell (i,j) = (%d,%d)\n", tid, p.rap, p.phi, sqrt(p.diB), p.i, p.j);
+    // if (blockIdx.x == 1) {
+    // PseudoJetExt p = particles[tid];
+    // printf("particle %3d has (rap,phi,pT) = (%f,%f,%f) and cell (i,j) = (%d,%d)\n", tid, p.rap, p.phi, sqrt(p.diB), p.i, p.j);
+    // }
   }
 }
 
-__global__ void set_jets_to_grid(Grid grid, PseudoJetExt *particles, const ParticleIndexType n, Algorithm algo) {
-  int start = threadIdx.x + blockIdx.x * blockDim.x;
-  int stride = gridDim.x * blockDim.x;
+__global__ void set_jets_to_grid(
+    Grid grid, PseudoJetExt *particles, const int *events_sizes, Algorithm algo, int max_event_size) {
+  int start = threadIdx.x;
+  int stride = blockDim.x;
+
+  const ParticleIndexType n = events_sizes[blockIdx.x];
+  grid.jets = &grid.jets[blockIdx.x * grid.max_i * grid.max_j * max_event_size];
+  particles = &particles[blockIdx.x * max_event_size];
 
   for (int tid = start; tid < n; tid += stride) {
     add_to_grid(grid, tid, particles[tid]);
   }
 }
 
-__global__ void reduce_recombine(
-    Grid grid, PseudoJetExt *pseudojets, Dist *min_dists, ParticleIndexType n, Algorithm algo, const float r) {
+__global__ void reduce_recombine(Grid grid,
+                                 PseudoJetExt *pseudojets,
+                                 Dist *min_dists,
+                                 int *events_sizes,
+                                 Algorithm algo,
+                                 const float r,
+                                 int max_event_size) {
   extern __shared__ Dist sdata[];
+
+  ParticleIndexType n = events_sizes[blockIdx.x];
+  grid.jets = &grid.jets[blockIdx.x * grid.max_i * grid.max_j * max_event_size];
+  pseudojets = &pseudojets[blockIdx.x * max_event_size];
+  min_dists = &min_dists[blockIdx.x * max_event_size];
 
   const double one_over_r2 = 1. / (r * r);
   const Dist none{std::numeric_limits<double>::infinity(), -1, -1};
@@ -289,6 +325,7 @@ __global__ void reduce_recombine(
     min_dists[tid].i = -1;
     min_dists[tid].j = -1;
   }
+
   Dist min = none;
   while (n > 0) {
     for (int tid = threadIdx.x; tid < n; tid += blockDim.x) {
@@ -296,6 +333,9 @@ __global__ void reduce_recombine(
       Dist local_min = min_dists[tid];
       if (local_min.i == -1 or local_min.j == min.i or local_min.j == min.j or local_min.i == min.i or
           local_min.i == min.j or local_min.i >= n or local_min.j >= n) {
+        // __syncthreads();
+        // if (blockIdx.x == 1)
+        // printf("%d == PONTO 1 =======================\n", tid);
         local_min = minimum_in_cell(grid, pseudojets, none, tid, p.i, p.j, one_over_r2);
 
         bool right = p.i + 1 < grid.max_i;
@@ -364,7 +404,8 @@ __global__ void reduce_recombine(
 
     min = sdata[0];
     if (threadIdx.x == 0) {
-      //printf("will recombine pseudojets %d and %d with distance %f\n", min.i, min.j, min.distance);
+      // if (blockIdx.x == 1)
+        // printf("will recombine pseudojets %d and %d with distance %f\n", min.i, min.j, min.distance);
       if (min.i == min.j) {
         // remove the pseudojet at position min.j from the grid and promote it to jet status
         auto jet = pseudojets[min.j];
@@ -406,12 +447,21 @@ __global__ void reduce_recombine(
     n--;
     __syncthreads();
   }
+  __syncthreads();
+  // if (threadIdx.x == 0) {
+    // printf("end of block %d\n", blockIdx.x);
+  // }
 }
 #pragma endregion
 
-__global__ void init(const PseudoJet *particles, PseudoJetExt *jets, int size) {
-  int first = threadIdx.x + blockIdx.x * blockDim.x;
-  int stride = blockDim.x * gridDim.x;
+__global__ void init(const PseudoJet *particles, PseudoJetExt *jets, int *sizes, int max_event_size) {
+  int first = threadIdx.x;
+  int stride = blockDim.x;
+  int size = sizes[blockIdx.x];
+  particles = &particles[blockIdx.x * max_event_size];
+  jets = &jets[blockIdx.x * max_event_size];
+  // if (threadIdx.x == 0)
+    // printf("particles address = %p\n", particles);
 
   for (int i = first; i < size; i += stride) {
     jets[i].px = particles[i].px;
@@ -420,12 +470,19 @@ __global__ void init(const PseudoJet *particles, PseudoJetExt *jets, int size) {
     jets[i].E = particles[i].E;
     jets[i].index = particles[i].index;
     jets[i].isJet = particles[i].isJet;
+    // if (blockIdx.x == 1) {
+    // printf("jet %d %f %f %f %f\n", i, jets[i].px, jets[i].py, jets[i].pz, jets[i].E);
+    // printf("par %d %f %f %f %f\n", i, particles[i].px, particles[i].py, particles[i].pz, particles[i].E);
+    // }
   }
 }
 
-__global__ void output(const PseudoJetExt *jets, PseudoJet *particles, int size) {
-  int first = threadIdx.x + blockIdx.x * blockDim.x;
-  int stride = blockDim.x * gridDim.x;
+__global__ void output(const PseudoJetExt *jets, PseudoJet *particles, int *sizes, int max_event_size) {
+  int first = threadIdx.x;
+  int stride = blockDim.x;
+  int size = sizes[blockIdx.x];
+  particles = &particles[blockIdx.x * max_event_size];
+  jets = &jets[blockIdx.x * max_event_size];
 
   for (int i = first; i < size; i += stride) {
     particles[i].px = jets[i].px;
@@ -434,31 +491,45 @@ __global__ void output(const PseudoJetExt *jets, PseudoJet *particles, int size)
     particles[i].E = jets[i].E;
     particles[i].index = jets[i].index;
     particles[i].isJet = jets[i].isJet;
+    // if (blockIdx.x == 1) {
+    // printf("jet %d %f %f %f %f\n", i, jets[i].px, jets[i].py, jets[i].pz, jets[i].E);
+    // printf("par %d %f %f %f %f\n", i, particles[i].px, particles[i].py, particles[i].pz, particles[i].E);
+    // }
   }
 }
 
-void cluster(PseudoJet *particles, int size, Algorithm algo, double r, cudaStream_t stream, int *grid_ptr, PseudoJetExt *pseudojets, Dist *d_min_dists_ptr) {
+void cluster(PseudoJet *particles,
+             int *events_sizes,
+             int size,
+             Algorithm algo,
+             double r,
+             int max_event_size,
+             cudaStream_t stream,
+             int *grid_ptr,
+             PseudoJetExt *pseudojets,
+             Dist *d_min_dists_ptr) {
 #pragma region vectors
   // examples from FastJet span |rap| < 10
   // TODO: make the rap range dynamic, based on the data themselves
   // TODO: make the cell size dynamic, based on the data themselves
   // TODO: try to use __constant__ memory for config
-  Grid grid(-10., +10., 0, 2 * M_PI, r, size);
+  Grid grid(-10., +10., 0, 2 * M_PI, r, max_event_size);
   grid.jets = grid_ptr;
-  cudaCheck(cudaMemsetAsync(grid.jets, 0xff, sizeof(ParticleIndexType) * grid.max_i * grid.max_j * 3000, stream));
+  cudaCheck(cudaMemsetAsync(
+      grid.jets, 0xff, sizeof(ParticleIndexType) * grid.max_i * grid.max_j * size * max_event_size, stream));
 #pragma endregion
 
 #pragma region kernel_launches
- LaunchParameters l;
+  //LaunchParameters l;
 
   // copy the particles from the input buffer to the pseudojet structures
-  l = estimateMinimalGrid(init, size);
-  init<<<l.gridSize, l.blockSize, 0, stream>>>(particles, pseudojets, size);
+  //l = estimateMinimalGrid(init, size);
+  init<<<size, 256, 0, stream>>>(particles, pseudojets, events_sizes, max_event_size);
   cudaCheck(cudaGetLastError());
 
   // compute the jets cilindrical coordinates and grid indices
-  l = estimateMinimalGrid(set_jets_coordiinates, size);
-  set_jets_coordiinates<<<l.gridSize, l.blockSize, 0, stream>>>(grid, pseudojets, size, algo);
+  //l = estimateMinimalGrid(set_jets_coordiinates, size);
+  set_jets_coordiinates<<<size, 256, 0, stream>>>(grid, pseudojets, events_sizes, algo, max_event_size);
   cudaCheck(cudaGetLastError());
 
   // sort the inputs according to their grid coordinates and "beam" clustering distance
@@ -467,19 +538,21 @@ void cluster(PseudoJet *particles, int size, Algorithm algo, double r, cudaStrea
   //});
 
   // organise the jets in the grid
-  l = estimateMinimalGrid(set_jets_to_grid, size);
-  set_jets_to_grid<<<l.gridSize, l.blockSize, 0, stream>>>(grid, pseudojets, size, algo);
+  //l = estimateMinimalGrid(set_jets_to_grid, size);
+  set_jets_to_grid<<<size, 256, 0, stream>>>(grid, pseudojets, events_sizes, algo, max_event_size);
   cudaCheck(cudaGetLastError());
 
-  l = estimateSingleBlock(reduce_recombine, size);
-  int sharedMemory = sizeof(Dist) * size;
+  //l = estimateSingleBlock(reduce_recombine, size);
+  int sharedMemory = sizeof(Dist) * max_event_size;
 
-  reduce_recombine<<<l.gridSize, l.blockSize, sharedMemory, stream>>>(grid, pseudojets, d_min_dists_ptr, size, algo, r);
+  //std::cout << "block size = " << l.blockSize << "grid size = " << l.gridSize << "\n";
+  reduce_recombine<<<size, 256, sharedMemory, stream>>>(
+      grid, pseudojets, d_min_dists_ptr, events_sizes, algo, r, max_event_size);
   cudaCheck(cudaGetLastError());
 
   // copy the clustered jets back to the input buffer
-  l = estimateMinimalGrid(output, size);
-  output<<<l.gridSize, l.blockSize, 0, stream>>>(pseudojets, particles, size);
+  //l = estimateMinimalGrid(output, size);
+  output<<<size, 256, 0, stream>>>(pseudojets, particles, events_sizes, max_event_size);
   cudaCheck(cudaGetLastError());
 #pragma endregion
 
